@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Client Chat</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <style>
+        /* Custom styles for a simple client chat interface */
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #e2e8f0; /* Light background */
+            color: #2d3748; /* Dark text */
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 1rem;
+        }
+        .chat-container {
+            background-color: #ffffff; /* White background for container */
+            border-radius: 0.5rem; /* Rounded corners */
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1); /* Subtle shadow */
+            width: 95%; /* Responsive width */
+            max-width: 500px; /* Max width for larger screens */
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            min-height: 70vh; /* Minimum height */
+        }
+        .chat-box {
+            flex-grow: 1;
+            padding: 1rem;
+            overflow-y: auto; /* Enable scrolling for messages */
+            display: flex;
+            flex-direction: column;
+        }
+        .message {
+            margin-bottom: 0.75rem;
+            padding: 0.5rem 0.75rem;
+            border-radius: 0.375rem;
+            max-width: 80%; /* Limit message width */
+            word-wrap: break-word; /* Break long words */
+        }
+        .message.user {
+            align-self: flex-end; /* Align user messages to the right */
+            background-color: #63b3ed; /* Light blue background for user */
+            color: #2d3748; /* Dark text */
+        }
+        .message.agent {
+            align-self: flex-start; /* Align agent messages to the left */
+            background-color: #48bb78; /* Green background for agent */
+            color: white;
+        }
+         .message.system {
+             align-self: center; /* Center system messages */
+             background-color: #a0aec0; /* Gray for system */
+             color: #2d3748;
+             font-size: 0.8rem;
+             margin-top: 0.5rem;
+             margin-bottom: 0.5rem;
+        }
+        .input-area {
+            display: flex;
+            padding: 1rem;
+            border-top: 1px solid #e2e8f0; /* Border above input */
+        }
+        .input-area input[type="text"] {
+            flex-grow: 1;
+            padding: 0.75rem;
+            border: 1px solid #cbd5e0;
+            border-radius: 0.375rem;
+            background-color: #ffffff;
+            color: #2d3748;
+            margin-right: 0.5rem;
+            outline: none; /* Remove default outline */
+        }
+        .input-area input[type="text"]:focus {
+            border-color: #4299e1; /* Highlight on focus */
+        }
+        .input-area button {
+            padding: 0.75rem 1.5rem;
+            background-color: #4299e1; /* Blue button */
+            color: white;
+            border: none;
+            border-radius: 0.375rem;
+            cursor: pointer;
+            transition: background-color 0.2s ease-in-out;
+        }
+        .input-area button:hover {
+            background-color: #3182ce; /* Darker blue on hover */
+        }
+    </style>
+</head>
+<body>
+    <div class="chat-container">
+        <div class="chat-box" id="chat-box">
+            <div class="message system">Connecting to support...</div>
+        </div>
+        <div class="input-area">
+            <input type="text" id="message-input" placeholder="Type your message...">
+            <button id="send-button">Send</button>
+        </div>
+    </div>
+
+    <script>
+        // --- Socket.IO Connection ---
+        // Replace with your ChatRelay server address if it's not running locally
+        const CHAT_RELAY_SERVER_ADDRESS = 'http://localhost:5000';
+        const socket = io(CHAT_RELAY_SERVER_ADDRESS);
+
+        // Get references to DOM elements
+        const chatBox = document.getElementById('chat-box');
+        const messageInput = document.getElementById('message-input');
+        const sendButton = document.getElementById('send-button');
+
+        // --- Event Listeners ---
+
+        // Handle successful connection
+        socket.on('connect', () => {
+            console.log('Connected to server!');
+            // Clear initial connecting message
+            chatBox.innerHTML = '';
+            appendSystemMessage('Connected. Waiting for an agent...');
+        });
+
+        // Handle connection errors
+        socket.on('connect_error', (err) => {
+            console.error('Connection Error:', err);
+            // Display an error message in the chat box
+            appendSystemMessage(`Connection failed: ${err.message}`);
+            sendButton.disabled = true;
+            messageInput.disabled = true;
+        });
+
+        // Handle disconnections
+        socket.on('disconnect', () => {
+            console.log('Disconnected from server.');
+            // Display a disconnection message
+            appendSystemMessage('Disconnected from server.');
+            sendButton.disabled = true;
+            messageInput.disabled = true;
+        });
+
+        // Handle incoming messages from the server (from the agent)
+        socket.on('message_to_client', (data) => {
+            console.log('Message received:', data);
+            // Append the received message to the chat box
+            if (data.user && data.text) {
+                // Determine the class based on the user (e.g., 'user' or 'agent')
+                const messageClass = data.user.toLowerCase() === 'agent' ? 'agent' : 'system'; // Assuming 'Agent' is the agent's user name
+                appendMessage(data.user, data.text, messageClass);
+            } else if (data.system_message) {
+                 // Handle potential system messages directly sent to client (if any are added later)
+                 appendSystemMessage(data.system_message);
+            }
+        });
+
+        // Handle send button click
+        sendButton.addEventListener('click', () => {
+            sendMessage();
+        });
+
+        // Handle pressing Enter key in the input field
+        messageInput.addEventListener('keypress', (event) => {
+            // Check if the pressed key is Enter (key code 13)
+            if (event.key === 'Enter') {
+                event.preventDefault(); // Prevent default form submission if inside a form
+                sendMessage();
+            }
+        });
+
+        // --- Functions ---
+
+        // Function to send a message to the server
+        function sendMessage() {
+            const text = messageInput.value.trim();
+            if (text && socket.connected) { // Only send if connected
+                console.log('Sending message:', text);
+                // Emit the message to the server using the 'client_message' event
+                socket.emit('client_message', { text: text });
+                // Append the user's message to the chat box immediately
+                appendMessage('You', text, 'user');
+                // Clear the input field
+                messageInput.value = '';
+                // Scroll to the bottom of the chat box
+                scrollToBottom();
+            } else if (!socket.connected) {
+                 console.warn("Attempted to send message while disconnected.");
+                 appendSystemMessage("Cannot send message: Disconnected from server.");
+            }
+        }
+
+        // Function to append a message to the chat box
+        function appendMessage(user, text, type) {
+            const messageElement = document.createElement('div');
+            messageElement.classList.add('message', type); // Add 'message' and type class ('user', 'agent', or 'system')
+            // You could add the user's name here if desired, but for simplicity, we'll just show the text
+            // messageElement.innerHTML = `<strong>${user}:</strong> ${text}`;
+            messageElement.textContent = text; // Use textContent to prevent XSS
+
+            chatBox.appendChild(messageElement);
+            scrollToBottom(); // Scroll to the bottom after adding a message
+        }
+
+         // Function to append a system message to the chat box
+        function appendSystemMessage(text) {
+            const messageElement = document.createElement('div');
+            messageElement.classList.add('message', 'system'); // Add 'message' and 'system' class
+            messageElement.textContent = text; // Use textContent to prevent XSS
+
+            chatBox.appendChild(messageElement);
+            scrollToBottom(); // Scroll to the bottom
+        }
+
+
+        // Function to scroll the chat box to the bottom
+        function scrollToBottom() {
+            chatBox.scrollTop = chatBox.scrollHeight;
+        }
+
+    </script>
+</body>
+</html>
