@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agent Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <style>
+        /* Custom styles for the dashboard */
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #1a202c; /* Dark background */
+            color: #e2e8f0; /* Light text */
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 1rem; /* Add some padding */
+        }
+        .dashboard-container {
+            background-color: #2d3748; /* Slightly lighter dark background */
+            border-radius: 0.5rem; /* Rounded corners */
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1); /* Subtle shadow */
+            width: 95%; /* Responsive width */
+            max-width: 900px; /* Max width for larger screens */
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            min-height: 80vh; /* Minimum height */
+        }
+        .chat-area {
+            display: flex;
+            flex-grow: 1;
+            overflow-y: hidden; /* Prevent main container scroll */
+        }
+        .client-list {
+            width: 200px; /* Fixed width for client list */
+            background-color: #4a5568; /* Darker background for list */
+            padding: 1rem;
+            overflow-y: auto; /* Scroll for client list */
+            border-right: 1px solid #2d3748; /* Separator */
+            flex-shrink: 0; /* Prevent shrinking */
+        }
+        .client-item {
+            padding: 0.75rem;
+            margin-bottom: 0.5rem;
+            background-color: #2d3748;
+            border-radius: 0.375rem;
+            cursor: pointer;
+            transition: background-color 0.2s ease-in-out;
+            font-size: 0.9rem;
+        }
+        .client-item:hover {
+            background-color: #5a677d; /* Highlight on hover */
+        }
+        .client-item.active {
+             background-color: #4299e1; /* Highlight active client */
+             font-weight: bold;
+        }
+        .message-box {
+            flex-grow: 1;
+            padding: 1rem;
+            overflow-y: auto; /* Scroll for messages */
+            display: flex;
+            flex-direction: column;
+        }
+        .message {
+            margin-bottom: 0.75rem;
+            padding: 0.5rem 0.75rem;
+            border-radius: 0.375rem;
+            max-width: 80%; /* Limit message width */
+            word-wrap: break-word; /* Break long words */
+        }
+        .message.client {
+            align-self: flex-start; /* Align client messages left */
+            background-color: #63b3ed; /* Light blue for client */
+            color: #2d3748; /* Dark text */
+        }
+         .message.agent {
+            align-self: flex-end; /* Align agent messages right */
+            background-color: #48bb78; /* Green for agent */
+            color: white;
+        }
+        .message.system {
+             align-self: center; /* Center system messages */
+             background-color: #718096; /* Gray for system */
+             color: white;
+             font-size: 0.8rem;
+             margin-top: 0.5rem;
+             margin-bottom: 0.5rem;
+        }
+        .input-area {
+            display: flex;
+            padding: 1rem;
+            border-top: 1px solid #4a5568; /* Border above input */
+        }
+        .input-area input[type="text"] {
+            flex-grow: 1;
+            padding: 0.75rem;
+            border: 1px solid #4a5568;
+            border-radius: 0.375rem;
+            background-color: #2d3748;
+            color: #e2e8f0;
+            margin-right: 0.5rem;
+            outline: none;
+        }
+        .input-area input[type="text"]:focus {
+            border-color: #4299e1;
+        }
+        .input-area button {
+            padding: 0.75rem 1.5rem;
+            background-color: #48bb78; /* Green button */
+            color: white;
+            border: none;
+            border-radius: 0.375rem;
+            cursor: pointer;
+            transition: background-color 0.2s ease-in-out;
+        }
+        .input-area button:hover {
+            background-color: #38a169;
+        }
+        /* Style for the client ID prefix in the input */
+        #message-input::placeholder {
+            color: #a0aec0; /* Lighter placeholder text */
+        }
+    </style>
+</head>
+<body>
+    <div class="dashboard-container">
+        <div class="chat-area">
+            <div class="client-list" id="client-list">
+                <div class="client-item">Connecting...</div>
+            </div>
+            <div class="message-box" id="message-box">
+                <div class="message system">Connecting to ChatRelay server...</div>
+            </div>
+        </div>
+        <div class="input-area">
+            <input type="text" id="message-input" placeholder="Select a client to type...">
+            <button id="send-button" disabled>Send</button> </div>
+    </div>
+
+    <script>
+        // --- Configuration from Flask Backend ---
+        // These variables are set by the Flask server when rendering the template
+        const CHAT_RELAY_SERVER_ADDRESS = "{{ chat_relay_server_address }}";
+        const AGENT_AUTH_TOKEN = "{{ agent_auth_token }}";
+
+        // --- Socket.IO Connection to ChatRelay Server ---
+        const socket = io(CHAT_RELAY_SERVER_ADDRESS);
+
+        // --- DOM Elements ---
+        const clientList = document.getElementById('client-list');
+        const messageBox = document.getElementById('message-box');
+        const messageInput = document.getElementById('message-input');
+        const sendButton = document.getElementById('send-button');
+
+        // --- State Management (Simple) ---
+        let activeClientSid = null; // The SID of the client currently being viewed/messaged
+        const clientMessages = {}; // Store messages for each client: { client_sid: [ {user: 'Client', text: '...'}, ... ], ... }
+        const activeClients = new Set(); // Set of client SIDs that have sent messages or are active
+
+        // --- Event Listeners ---
+
+        // Handle successful connection to ChatRelay server
+        socket.on('connect', () => {
+            console.log('Connected to ChatRelay server!');
+            appendSystemMessage('Connected to ChatRelay server.');
+
+            // --- Agent Authentication (Production) ---
+            // Emit the 'agent_connect' event with authentication data.
+            // The server MUST validate this token.
+            socket.emit('agent_connect', { auth_token: AGENT_AUTH_TOKEN });
+            console.log('Emitted agent_connect with auth token.');
+
+            // Clear initial connecting message and list item
+            clientList.innerHTML = '';
+            messageBox.innerHTML = '';
+            appendSystemMessage('Awaiting client messages...');
+        });
+
+        // Handle connection errors
+        socket.on('connect_error', (err) => {
+            console.error('ChatRelay Connection Error:', err);
+            appendSystemMessage(`ChatRelay Connection failed: ${err.message}`);
+             clientList.innerHTML = '<div class="client-item">Connection Error</div>';
+             sendButton.disabled = true;
+             messageInput.disabled = true;
+        });
+
+        // Handle disconnections
+        socket.on('disconnect', () => {
+            console.log('Disconnected from ChatRelay server.');
+            appendSystemMessage('Disconnected from ChatRelay server.');
+            activeClientSid = null;
+            activeClients.clear();
+            clientMessages = {};
+            clientList.innerHTML = '<div class="client-item">Disconnected</div>';
+            messageBox.innerHTML = '';
+            sendButton.disabled = true;
+            messageInput.disabled = true;
+        });
+
+        // Handle incoming messages from clients (relayed by the server)
+        socket.on('message_to_agent', (data) => {
+            console.log('Message from client received:', data);
+            const clientSid = data.client_sid;
+            const messageText = data.text;
+            const user = data.user || 'Client';
+
+            if (!clientSid || !messageText) {
+                 console.warn("Received incomplete message_to_agent:", data);
+                 return;
+            }
+
+            // Add client to the list if not already there
+            if (!activeClients.has(clientSid)) {
+                activeClients.add(clientSid);
+                addClientToList(clientSid);
+            }
+
+            // Store the message
+            if (!clientMessages[clientSid]) {
+                clientMessages[clientSid] = [];
+            }
+            clientMessages[clientSid].push({ user: user, text: messageText });
+
+            // If this is the active client, display the message
+            if (activeClientSid === clientSid) {
+                appendMessage(user, messageText, 'client'); // Use 'client' class for client messages
+            } else {
+                 // Optional: Visually indicate new message for non-active client
+                 const clientItem = document.querySelector(`.client-item[data-sid="${clientSid}"]`);
+                 if (clientItem && !clientItem.classList.contains('active')) {
+                     clientItem.style.fontWeight = 'bold'; // Simple visual cue
+                 }
+            }
+        });
+
+        // Handle incoming system messages from the server
+        socket.on('system_message_to_agent', (data) => {
+             console.log('System message received:', data);
+             const messageText = data.text || data.system_message || 'Unknown system message';
+             const clientSid = data.client_sid || 'N/A'; // System messages might relate to a client
+
+             appendSystemMessage(`[${clientSid}] ${messageText}`);
+
+             // If a client disconnects, remove them from the list and clear their messages
+             if (data.client_sid && messageText.includes('disconnected')) {
+                 removeClientFromList(data.client_sid);
+                 if (clientMessages[data.client_sid]) {
+                     delete clientMessages[data.client_sid];
+                 }
+                 if (activeClientSid === data.client_sid) {
+                     activeClientSid = null;
+                     messageBox.innerHTML = ''; // Clear message box
+                     appendSystemMessage('Client disconnected. Select another client.');
+                     messageInput.placeholder = "Select a client to type...";
+                     sendButton.disabled = true;
+                 }
+             }
+        });
+
+
+        // Handle send button click
+        sendButton.addEventListener('click', () => {
+            sendMessage();
+        });
+
+        // Handle pressing Enter key in the input field
+        messageInput.addEventListener('keypress', (event) => {
+            if (event.key === 'Enter' && !sendButton.disabled) {
+                event.preventDefault();
+                sendMessage();
+            }
+        });
+
+        // --- Functions ---
+
+        // Function to add a client to the list
+        function addClientToList(sid) {
+            // Check if the client is already in the list
+            if (document.querySelector(`.client-item[data-sid="${sid}"]`)) {
+                return; // Client already exists
+            }
+
+            const clientItem = document.createElement('div');
+            clientItem.classList.add('client-item', 'p-3', 'mb-2', 'bg-gray-700', 'rounded', 'cursor-pointer'); // Tailwind classes
+            clientItem.textContent = `Client: ${sid}`;
+            clientItem.dataset.sid = sid; // Store SID in a data attribute
+
+            // Add click listener to select client
+            clientItem.addEventListener('click', () => {
+                selectClient(sid);
+            });
+
+            clientList.appendChild(clientItem);
+        }
+
+        // Function to remove a client from the list
+        function removeClientFromList(sid) {
+             const clientItem = document.querySelector(`.client-item[data-sid="${sid}"]`);
+             if (clientItem) {
+                 clientList.removeChild(clientItem);
+             }
+             activeClients.delete(sid); // Remove from active set
+        }
+
+
+        // Function to select a client to view messages and send replies
+        function selectClient(sid) {
+            if (activeClientSid === sid) {
+                return; // Already active
+            }
+
+            // Deselect previous active client
+            if (activeClientSid) {
+                const prevActiveItem = document.querySelector(`.client-item[data-sid="${activeClientSid}"]`);
+                if (prevActiveItem) {
+                    prevActiveItem.classList.remove('active');
+                    prevActiveItem.style.fontWeight = 'normal'; // Remove bolding
+                }
+            }
+
+            // Set new active client
+            activeClientSid = sid;
+            const newActiveItem = document.querySelector(`.client-item[data-sid="${activeClientSid}"]`);
+            if (newActiveItem) {
+                newActiveItem.classList.add('active');
+                 newActiveItem.style.fontWeight = 'bold'; // Bold active client
+            }
+
+            // Clear message box and display messages for the selected client
+            messageBox.innerHTML = '';
+            if (clientMessages[activeClientSid]) {
+                clientMessages[activeClientSid].forEach(msg => {
+                    const msgType = msg.user.toLowerCase() === 'client' ? 'client' : 'agent'; // Assuming 'Agent' is agent's user name
+                    appendMessage(msg.user, msg.text, msgType);
+                });
+            } else {
+                appendSystemMessage(`Conversation started with client ${activeClientSid}.`);
+            }
+
+            // Enable input and set placeholder
+            messageInput.placeholder = `Message to ${activeClientSid}:`;
+            sendButton.disabled = false;
+            messageInput.disabled = false;
+            messageInput.focus(); // Focus the input field
+        }
+
+
+        // Function to send a message to the server for the active client
+        function sendMessage() {
+            const text = messageInput.value.trim();
+            if (text && activeClientSid) {
+                console.log(`Sending message to server for client ${activeClientSid}: ${text}`);
+                // Emit the agent_message event to the server
+                socket.emit('agent_message', { client_sid: activeClientSid, text: text });
+
+                // Append the agent's message to the chat box immediately
+                // Store and display with 'Agent' user and 'agent' class
+                const agentMessage = { user: 'Agent', text: text };
+                 if (!clientMessages[activeClientSid]) {
+                    clientMessages[activeClientSid] = [];
+                 }
+                clientMessages[activeClientSid].push(agentMessage);
+                appendMessage('Agent', text, 'agent');
+
+                // Clear the input field
+                messageInput.value = '';
+                // Scroll to the bottom of the message box
+                scrollToBottom(messageBox);
+            } else if (!activeClientSid) {
+                console.warn("Attempted to send message without an active client selected.");
+                // Optionally alert the agent
+                alert("Please select a client to send a message.");
+            }
+        }
+
+        // Function to append a message to the message box
+        function appendMessage(user, text, type) {
+            const messageElement = document.createElement('div');
+            messageElement.classList.add('message', type); // Add 'message' and type class ('client' or 'agent')
+            messageElement.textContent = text; // Use textContent to prevent XSS
+
+            messageBox.appendChild(messageElement);
+            scrollToBottom(messageBox); // Scroll to the bottom after adding a message
+        }
+
+         // Function to append a system message to the message box
+        function appendSystemMessage(text) {
+            const messageElement = document.createElement('div');
+            messageElement.classList.add('message', 'system'); // Add 'message' and 'system' class
+            messageElement.textContent = text; // Use textContent to prevent XSS
+
+            messageBox.appendChild(messageElement);
+            scrollToBottom(messageBox); // Scroll to the bottom
+        }
+
+
+        // Function to scroll a given element to the bottom
+        function scrollToBottom(element) {
+            element.scrollTop = element.scrollHeight;
+        }
+
+    </script>
+</body>
+</html>
